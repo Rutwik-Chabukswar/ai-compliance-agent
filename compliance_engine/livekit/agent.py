@@ -249,5 +249,4 @@ async def run_livekit_agent(
         chunk_duration=chunk_duration,
     )
 
-    await agent.run()</content>
-<parameter name="filePath">/Users/myaccount/Desktop/ai-compliance-agent/compliance_engine/livekit/agent.py
+    await agent.run()

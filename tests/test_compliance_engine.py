@@ -38,8 +38,8 @@ def mock_retriever() -> MagicMock:
     """Return a mock retriever that returns a dummy chunk and score."""
     from compliance_engine.rag import PolicyChunk, PolicyRetriever
     retriever = MagicMock(spec=PolicyRetriever)
-    chunk = PolicyChunk(source_file="dummy.txt", content="Dummy rule.", domain="fintech")
-    retriever.retrieve.return_value = [(chunk, 0.95)]
+    chunk = PolicyChunk(source_file="dummy.txt", content="Guaranteed returns promise is illegal violation.", domain="fintech")
+    retriever.retrieve.return_value = [(chunk, 0.3)]
     return retriever
 
 
@@ -231,7 +231,7 @@ class TestComplianceEngineAnalyse:
         result = engine.analyse("We guarantee 15% returns.", "fintech")
         assert result.violation is True
         assert result.risk_level == "high"
-        assert result.confidence == 0.95
+        assert result.confidence == 0.625
 
     def test_compliant_transcript(self, engine, mock_llm_client):
         mock_llm_client.chat.return_value = _make_raw(
@@ -293,7 +293,7 @@ class TestComplianceEngineAnalyse:
         result = engine.analyse("Transcript.", "fintech")
         d = result.to_dict()
         assert "confidence" in d
-        assert d["confidence"] == 0.915
+        assert d["confidence"] == 0.59
 
     def test_to_dict_excludes_raw_response(self, engine, mock_llm_client):
         mock_llm_client.chat.return_value = _make_raw(False, "low", "OK", "No action required.")

@@ -66,6 +66,8 @@ class DebugInfo:
     matched_rule: str
     reasoning_summary: str
     retrieved_policies: Optional[List[str]] = None
+    grounding_score: Optional[float] = None
+    grounding_passed: Optional[bool] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = {
@@ -74,6 +76,10 @@ class DebugInfo:
         }
         if self.retrieved_policies is not None:
             d["retrieved_policies"] = self.retrieved_policies
+        if self.grounding_score is not None:
+            d["grounding_score"] = self.grounding_score
+        if self.grounding_passed is not None:
+            d["grounding_passed"] = self.grounding_passed
         return d
 
 
@@ -339,6 +345,24 @@ def _fallback_result(raw: str, error: Exception) -> ComplianceResult:
 # Main engine
 # ---------------------------------------------------------------------------
 
+def _calculate_grounding(reasoning: str, policies_text: str) -> float:
+    """Calculate a simple phrase/keyword overlap score between LLM reasoning and retrieved policies."""
+    if not policies_text or not reasoning:
+        return 0.0
+
+    policy_words = set(re.findall(r'\b[a-z]{5,}\b', policies_text.lower()))
+    reasoning_words = set(re.findall(r'\b[a-z]{5,}\b', reasoning.lower()))
+
+    if not reasoning_words:
+        return 0.0
+
+    overlap = reasoning_words.intersection(policy_words)
+    score = len(overlap) / max(1, len(reasoning_words))
+    
+    # Boost score slightly so partial keyword matching passes
+    return min(1.0, score * 1.5)
+
+
 class ComplianceEngine:
     """
     High-level compliance detection engine.
@@ -436,6 +460,7 @@ class ComplianceEngine:
 
         # Retrieve policies if context not already set
         retrieved_snippets: List[str] = []
+        raw_policy_text: str = ""
         top_score: float = 0.0
 
         if rag_context is None and self._retriever:
@@ -459,6 +484,7 @@ class ComplianceEngine:
                 )
                 
             top_score = retrieved_chunks[0][1]
+            raw_policy_text = "\n".join(c.content for c, _ in retrieved_chunks)
             retrieved_snippets = [f"{c.source_file} (score: {score:.2f})" for c, score in retrieved_chunks]
             
             rag_context_parts = ["=== RELEVANT REGULATORY POLICIES ==="]
@@ -494,6 +520,21 @@ class ComplianceEngine:
             if self._use_fallback:
                 return _fallback_result(raw, exc)
             raise
+
+        # Grounding Validation Layer
+        if rag_context is not None and raw_policy_text:
+            grounding_score = _calculate_grounding(result.reason, raw_policy_text)
+            grounding_passed = grounding_score >= 0.3
+            
+            if debug and result.debug is not None:
+                result.debug.grounding_score = round(grounding_score, 2)
+                result.debug.grounding_passed = grounding_passed
+                
+            if result.violation and not grounding_passed:
+                logger.warning("Grounding failed (score=%.2f). Overriding violation flag.", grounding_score)
+                result.violation = False
+                result.confidence = min(result.confidence, 0.3)
+                result.reason = "Insufficient grounding in retrieved policies."
 
         # Inject retrieved snippets into debug manually (since LLM didn't return them)
         if debug and result.debug is not None and retrieved_snippets:

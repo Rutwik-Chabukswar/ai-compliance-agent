@@ -1,0 +1,484 @@
+"""
+compliance_engine.py
+--------------------
+Core compliance detection logic.
+
+Responsibilities
+~~~~~~~~~~~~~~~~
+* Build the final prompt from templates + user inputs.
+* Call the LLM via ``LLMClient``.
+* Parse and validate the JSON response.
+* Provide a robust fallback when the response is malformed.
+* Expose a clean ``ComplianceResult`` dataclass for typed downstream use.
+
+Future RAG integration
+~~~~~~~~~~~~~~~~~~~~~~
+``ComplianceEngine.analyse()`` accepts an optional ``rag_context`` parameter.
+When populated (e.g., with policy chunks from a vector store), the context is
+forwarded to ``LLMClient.chat()`` as ``system_context`` and prepended to the
+system prompt before the model analyses the transcript.
+"""
+
+import json
+import logging
+import re
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Literal, Optional
+
+from compliance_engine.llm_client import LLMClient, LLMClientError
+from compliance_engine.prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE, DEBUG_SYSTEM_ADDENDUM
+from compliance_engine.config import POLICIES_DIR, RAG_TOP_K
+from compliance_engine.rag import PolicyRetriever, load_policies_from_directory, PolicyChunk
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+
+RiskLevel = Literal["low", "medium", "high"]
+
+VALID_RISK_LEVELS: frozenset[str] = frozenset({"low", "medium", "high"})
+
+VALID_MATCHED_RULES: frozenset[str] = frozenset({
+    "ILLEGAL_CLAIM",
+    "MISLEADING_GUARANTEE",
+    "MISSING_MANDATORY_DISCLOSURE",
+    "COMPLIANT",
+})
+
+
+@dataclass
+class DebugInfo:
+    """
+    Optional debugging metadata returned when ``debug=True`` is passed.
+
+    Attributes
+    ----------
+    matched_rule:
+        The specific regulation category that triggered the decision.
+        One of ``ILLEGAL_CLAIM``, ``MISLEADING_GUARANTEE``,
+        ``MISSING_MANDATORY_DISCLOSURE``, or ``COMPLIANT``.
+    reasoning_summary:
+        One short sentence (≤20 words) capturing the model's core reasoning.
+    """
+
+    matched_rule: str
+    reasoning_summary: str
+    retrieved_policies: Optional[List[str]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = {
+            "matched_rule": self.matched_rule,
+            "reasoning_summary": self.reasoning_summary,
+        }
+        if self.retrieved_policies is not None:
+            d["retrieved_policies"] = self.retrieved_policies
+        return d
+
+
+@dataclass
+class ComplianceResult:
+    """
+    Typed representation of a compliance analysis result.
+
+    Attributes
+    ----------
+    violation:
+        ``True`` if the transcript contains a flaggable compliance issue.
+    risk_level:
+        Severity of the finding: ``"low"``, ``"medium"``, or ``"high"``.
+    confidence:
+        Model certainty in the decision, in the range [0.0, 1.0].
+        Values below 0.7 should trigger a human review.
+    reason:
+        Human-readable explanation of the finding.
+    suggestion:
+        Recommended corrective action, or ``"No action required."`` if clean.
+    debug:
+        Optional debug metadata. Populated only when ``debug=True`` is passed
+        to :meth:`ComplianceEngine.analyse`.
+    raw_response:
+        The unprocessed string returned by the LLM (useful for debugging).
+    """
+
+    violation: bool
+    risk_level: RiskLevel
+    confidence: float
+    reason: str
+    suggestion: str
+    debug: Optional[DebugInfo] = field(default=None)
+    raw_response: str = field(repr=False, default="")
+
+    def to_dict(self, include_debug: bool = True) -> Dict[str, Any]:
+        """Return the public fields as a plain dict (excludes ``raw_response``).
+
+        Parameters
+        ----------
+        include_debug:
+            When ``True`` (default), include the ``debug`` sub-object if
+            it is present. Set to ``False`` to get the minimal production schema.
+        """
+        d: Dict[str, Any] = {
+            "violation": self.violation,
+            "risk_level": self.risk_level,
+            "confidence": round(self.confidence, 4),
+            "reason": self.reason,
+            "suggestion": self.suggestion,
+        }
+        if include_debug and self.debug is not None:
+            d["debug"] = self.debug.to_dict()
+        return d
+
+    def to_json(self, indent: int = 2, include_debug: bool = True) -> str:
+        """Serialise the public fields to a JSON string."""
+        return json.dumps(self.to_dict(include_debug=include_debug), indent=indent)
+
+
+# ---------------------------------------------------------------------------
+# Validation helpers
+# ---------------------------------------------------------------------------
+
+class ComplianceValidationError(Exception):
+    """Raised when the LLM output cannot be coerced into a valid result."""
+
+
+def _extract_json_block(text: str) -> str:
+    """
+    Extract the first ``{...}`` block from *text*.
+
+    This handles models that wrap JSON in markdown fences or add preamble text
+    despite being instructed not to.
+    """
+    # Strip markdown code fences if present
+    text = re.sub(r"```(?:json)?", "", text).strip()
+
+    # Find the outermost brace pair
+    start = text.find("{")
+    if start == -1:
+        raise ComplianceValidationError("No JSON object found in LLM response.")
+
+    depth = 0
+    for i, ch in enumerate(text[start:], start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+
+    raise ComplianceValidationError("Unbalanced braces in LLM response.")
+
+
+def _validate_and_coerce(data: Dict[str, Any], expect_debug: bool = False) -> ComplianceResult:
+    """
+    Validate the parsed JSON dict and coerce it into a :class:`ComplianceResult`.
+
+    Parameters
+    ----------
+    data:
+        Parsed dict from the LLM response.
+    expect_debug:
+        When ``True``, also parse and validate the ``debug`` sub-object.
+
+    Returns
+    -------
+    ComplianceResult
+
+    Raises
+    ------
+    ComplianceValidationError
+        If required fields are missing or values are out of range.
+    """
+    required = ("violation", "risk_level", "confidence", "reason", "suggestion")
+    missing = [k for k in required if k not in data]
+    if missing:
+        raise ComplianceValidationError(f"LLM response missing required fields: {missing}")
+
+    # -- violation --
+    violation = data["violation"]
+    if not isinstance(violation, bool):
+        # Some models return "true"/"false" strings
+        if str(violation).lower() == "true":
+            violation = True
+        elif str(violation).lower() == "false":
+            violation = False
+        else:
+            raise ComplianceValidationError(
+                f"'violation' must be a boolean, got: {violation!r}"
+            )
+
+    # -- risk_level --
+    risk_level = str(data["risk_level"]).strip().lower()
+    if risk_level not in VALID_RISK_LEVELS:
+        raise ComplianceValidationError(
+            f"'risk_level' must be one of {VALID_RISK_LEVELS}, got: {risk_level!r}"
+        )
+
+    # -- confidence --
+    try:
+        confidence = float(data["confidence"])
+    except (TypeError, ValueError) as exc:
+        raise ComplianceValidationError(
+            f"'confidence' must be a float, got: {data['confidence']!r}"
+        ) from exc
+    if not (0.0 <= confidence <= 1.0):
+        raise ComplianceValidationError(
+            f"'confidence' must be between 0.0 and 1.0, got: {confidence}"
+        )
+
+    # -- debug (optional) --
+    debug_info: Optional[DebugInfo] = None
+    if expect_debug:
+        raw_debug = data.get("debug")
+        if isinstance(raw_debug, dict):
+            matched_rule = str(raw_debug.get("matched_rule", "")).strip().upper()
+            if matched_rule not in VALID_MATCHED_RULES:
+                logger.warning(
+                    "Unknown matched_rule '%s'; keeping value as-is.", matched_rule
+                )
+            debug_info = DebugInfo(
+                matched_rule=matched_rule or "UNKNOWN",
+                reasoning_summary=str(raw_debug.get("reasoning_summary", "")).strip(),
+                retrieved_policies=raw_debug.get("retrieved_policies"),
+            )
+        else:
+            logger.warning("debug=True but LLM did not return a 'debug' object.")
+
+    return ComplianceResult(
+        violation=violation,
+        risk_level=risk_level,  # type: ignore[arg-type]
+        confidence=confidence,
+        reason=str(data.get("reason", "")).strip(),
+        suggestion=str(data.get("suggestion", "")).strip(),
+        debug=debug_info,
+    )
+
+
+def _parse_llm_response(raw: str, expect_debug: bool = False) -> ComplianceResult:
+    """
+    Parse the raw LLM string into a validated :class:`ComplianceResult`.
+
+    Strategy
+    --------
+    1. Attempt direct ``json.loads`` on the stripped response.
+    2. Fall back to regex extraction of the first ``{...}`` block.
+    3. Validate and coerce the parsed dict.
+
+    Raises
+    ------
+    ComplianceValidationError
+        If all parsing strategies fail.
+    """
+    raw_stripped = raw.strip()
+
+    # Strategy 1 – clean JSON
+    try:
+        data = json.loads(raw_stripped)
+        result = _validate_and_coerce(data, expect_debug=expect_debug)
+        result.raw_response = raw
+        return result
+    except (json.JSONDecodeError, ComplianceValidationError):
+        logger.debug("Direct JSON parse failed; attempting block extraction.")
+
+    # Strategy 2 – extract block then parse
+    try:
+        block = _extract_json_block(raw_stripped)
+        data = json.loads(block)
+        result = _validate_and_coerce(data, expect_debug=expect_debug)
+        result.raw_response = raw
+        logger.warning(
+            "JSON was embedded in extra text; extracted successfully. "
+            "Consider adjusting the prompt to prevent this."
+        )
+        return result
+    except (ComplianceValidationError, json.JSONDecodeError) as exc:
+        logger.error("JSON extraction/validation failed: %s | raw=%s", exc, raw[:300])
+        raise ComplianceValidationError(
+            f"Could not parse a valid compliance result from LLM output. "
+            f"Raw (first 300 chars): {raw[:300]!r}"
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Fallback result factory
+# ---------------------------------------------------------------------------
+
+def _fallback_result(raw: str, error: Exception) -> ComplianceResult:
+    """
+    Return a conservative fallback result when parsing fails unrecoverably.
+
+    The fallback flags the transcript as a potential medium-risk issue so that
+    a human reviewer is always notified rather than silently passing a bad
+    transcript.
+    """
+    logger.error(
+        "Returning fallback compliance result due to parse failure. "
+        "Review raw LLM output. error=%s | raw_preview=%s",
+        error,
+        raw[:200],
+    )
+    return ComplianceResult(
+        violation=True,
+        risk_level="medium",
+        confidence=0.0,
+        reason=(
+            "Automated compliance analysis encountered an error and could not "
+            "produce a definitive result. Manual review is required."
+        ),
+        suggestion=(
+            "Review the transcript manually. The automated engine returned "
+            "malformed output; this may indicate an unusual transcript or a "
+            "temporary model issue."
+        ),
+        raw_response=raw,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main engine
+# ---------------------------------------------------------------------------
+
+class ComplianceEngine:
+    """
+    High-level compliance detection engine.
+
+    Usage
+    -----
+    >>> from compliance_engine.compliance_engine import ComplianceEngine
+    >>> engine = ComplianceEngine()
+    >>> result = engine.analyse(
+    ...     transcript="We guarantee 15% annual returns.",
+    ...     domain="fintech",
+    ... )
+    >>> print(result.to_json())
+
+    Parameters
+    ----------
+    llm_client:
+        An :class:`~compliance_engine.llm_client.LLMClient` instance.
+        If ``None``, a default client is instantiated from ``config.py``.
+    retriever:
+        A :class:`~compliance_engine.rag.PolicyRetriever` instance.
+        If ``None``, policies are auto-loaded from ``POLICIES_DIR``.
+    use_fallback_on_error:
+        When ``True`` (default), a conservative fallback result is returned
+        if parsing fails instead of raising an exception. Set to ``False`` in
+        testing to surface errors explicitly.
+    """
+
+    def __init__(
+        self,
+        llm_client: Optional[LLMClient] = None,
+        retriever: Optional[PolicyRetriever] = None,
+        use_fallback_on_error: bool = True,
+    ) -> None:
+        self._client = llm_client or LLMClient()
+        self._use_fallback = use_fallback_on_error
+        
+        # Load retriever if not provided
+        if retriever is not None:
+            self._retriever = retriever
+        else:
+            chunks = load_policies_from_directory(POLICIES_DIR)
+            self._retriever = PolicyRetriever(chunks)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def analyse(
+        self,
+        transcript: str,
+        domain: str,
+        rag_context: Optional[str] = None,
+        debug: bool = False,
+    ) -> ComplianceResult:
+        """
+        Analyse a transcript for compliance violations.
+
+        Parameters
+        ----------
+        transcript:
+            The raw conversation or sales/marketing text to evaluate.
+        domain:
+            Regulatory domain context (e.g., ``"fintech"``, ``"insurance"``,
+            ``"healthcare"``).
+        rag_context:
+            Optional policy chunk(s). If not provided, the engine will
+            automatically retrieve relevant policies using the retriever.
+        debug:
+            When ``True``, ask the LLM to populate a ``debug`` sub-object
+            containing ``matched_rule`` and ``reasoning_summary``. The
+            ``debug`` field will be included in ``ComplianceResult.to_dict()``
+            and ``to_json()`` outputs.
+
+        Returns
+        -------
+        ComplianceResult
+            A validated, typed result object.
+        """
+        if not transcript or not transcript.strip():
+            raise ValueError("'transcript' must be a non-empty string.")
+        if not domain or not domain.strip():
+            raise ValueError("'domain' must be a non-empty string.")
+
+        logger.info(
+            "Compliance analysis requested | domain=%s | transcript_length=%d",
+            domain,
+            len(transcript),
+        )
+
+        user_prompt = USER_PROMPT_TEMPLATE.format(
+            domain=domain.strip(),
+            transcript=transcript.strip(),
+        )
+
+        # Retrieve policies if context not already set
+        retrieved_snippets: List[str] = []
+        if rag_context is None and self._retriever:
+            retrieved_chunks = self._retriever.retrieve(transcript, top_k=RAG_TOP_K)
+            if retrieved_chunks:
+                retrieved_snippets = [c.content for c in retrieved_chunks]
+                rag_context_parts = ["=== RELEVANT REGULATORY POLICIES ==="]
+                rag_context_parts.append("Use the following policies to determine compliance. These policies supersede general knowledge.")
+                for i, c in enumerate(retrieved_chunks, 1):
+                    rag_context_parts.append(f"\n--- Policy Snippet {i} [{c.source_file}] ---\n{c.content}")
+                rag_context = "\n".join(rag_context_parts)
+
+        # Compose the effective system prompt
+        system_prompt = SYSTEM_PROMPT
+        if debug:
+            system_prompt = SYSTEM_PROMPT + DEBUG_SYSTEM_ADDENDUM
+        if rag_context:
+            system_prompt = rag_context + "\n\n" + system_prompt
+
+        try:
+            raw = self._client.chat(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+        except LLMClientError as exc:
+            logger.error("LLM call failed: %s", exc)
+            if self._use_fallback:
+                return _fallback_result("", exc)
+            raise
+
+        try:
+            result = _parse_llm_response(raw, expect_debug=debug)
+        except ComplianceValidationError as exc:
+            if self._use_fallback:
+                return _fallback_result(raw, exc)
+            raise
+
+        # Inject retrieved snippets into debug manually (since LLM didn't return them)
+        if debug and result.debug is not None and retrieved_snippets:
+            result.debug.retrieved_policies = retrieved_snippets
+
+        logger.info(
+            "Compliance analysis complete | domain=%s | violation=%s | risk=%s",
+            domain,
+            result.violation,
+            result.risk_level,
+        )
+        return result

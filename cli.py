@@ -44,6 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Path to a plain-text file containing the transcript.",
     )
+    source.add_argument(
+        "--audio", "-a",
+        type=Path,
+        help="Path to an audio file (e.g., .wav) to transcribe before analysis.",
+    )
     parser.add_argument(
         "--domain", "-d",
         required=True,
@@ -55,6 +60,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Override the default LLM model (e.g. gpt-4o, gpt-4o-mini).",
+    )
+    parser.add_argument(
+        "--audio-provider",
+        type=str,
+        choices=["whisper", "sarvam"],
+        default=None,
+        help="Audio transcription provider (default: whisper).",
     )
     parser.add_argument(
         "--rag-context",
@@ -76,6 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output compact single-line JSON.",
     )
     parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Simulate streaming by processing the transcript chunk-by-chunk.",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable DEBUG-level logging.",
@@ -95,6 +112,21 @@ def main() -> None:
         if not args.file.exists():
             parser.error(f"File not found: {args.file}")
         transcript = args.file.read_text(encoding="utf-8")
+    elif args.audio:
+        if not args.audio.exists():
+            parser.error(f"Audio file not found: {args.audio}")
+        from compliance_engine.audio.transcriber import transcribe_audio
+        
+        print(f"[•] Transcribing audio file: {args.audio} ...", file=sys.stderr)
+        transcript_data = transcribe_audio(args.audio, provider=args.audio_provider)
+        transcript = transcript_data["text"]
+        
+        # Debug Output
+        print("\n--- Audio Transcript ---", file=sys.stderr)
+        if transcript_data.get("confidence") is not None:
+            print(f"Confidence: {transcript_data['confidence']:.2f}", file=sys.stderr)
+        print(transcript, file=sys.stderr)
+        print("------------------------\n", file=sys.stderr)
     else:
         transcript = args.transcript
 
@@ -106,18 +138,46 @@ def main() -> None:
 
     engine = ComplianceEngine(**engine_kwargs)
 
-    result = engine.analyse(
-        transcript=transcript,
-        domain=args.domain,
-        rag_context=args.rag_context,
-    )
+    if args.stream:
+        from compliance_engine.streaming import StreamingProcessor
+        from compliance_engine.streaming.segmenter import simulate_segmentation
+        
+        processor = StreamingProcessor(engine, args.domain)
+        # Deeply analyze punctuation, pauses, and speakers simulating Celerio VAD
+        segments = simulate_segmentation(transcript)
+        
+        print("\n=== Streaming Analysis Initialized ===", file=sys.stderr)
+        final_result = None
+        for i, chunk_data in enumerate(segments):
+            text = chunk_data.get("text", "")
+            speaker = chunk_data.get("speaker", "unknown").title()
+            print(f"\n[Chunk {i+1}] [{speaker}]: '{text}'", file=sys.stderr)
+            
+            result = processor.process_chunk(chunk_data)
+            if result:
+                print(f"  -> Violation: {result.violation} | Risk: {result.risk_level} | Conf: {result.confidence:.2f}", file=sys.stderr)
+                if result.violation:
+                    print(f"  -> Reason: {result.reason}", file=sys.stderr)
+                final_result = result
+                
+        print("\n=== Stream Complete ===\n", file=sys.stderr)
+        
+        indent = None if args.compact else 2
+        output = json.dumps(final_result.to_dict() if final_result else {}, indent=indent)
+        print(output)
+        sys.exit(1 if (final_result and final_result.violation) else 0)
+    else:
+        # Standard synchronous execution
+        result = engine.analyse(
+            transcript=transcript,
+            domain=args.domain,
+            rag_context=args.rag_context,
+        )
 
-    indent = None if args.compact else 2
-    output = json.dumps(result.to_dict(), indent=indent)
-    print(output)
-
-    # Exit with non-zero code if a violation was detected (useful in CI pipelines)
-    sys.exit(1 if result.violation else 0)
+        indent = None if args.compact else 2
+        output = json.dumps(result.to_dict(), indent=indent)
+        print(output)
+        sys.exit(1 if result.violation else 0)
 
 
 if __name__ == "__main__":

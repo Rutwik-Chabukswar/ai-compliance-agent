@@ -436,15 +436,39 @@ class ComplianceEngine:
 
         # Retrieve policies if context not already set
         retrieved_snippets: List[str] = []
+        top_score: float = 0.0
+
         if rag_context is None and self._retriever:
-            retrieved_chunks = self._retriever.retrieve(transcript, top_k=RAG_TOP_K)
-            if retrieved_chunks:
-                retrieved_snippets = [c.content for c in retrieved_chunks]
-                rag_context_parts = ["=== RELEVANT REGULATORY POLICIES ==="]
-                rag_context_parts.append("Use the following policies to determine compliance. These policies supersede general knowledge.")
-                for i, c in enumerate(retrieved_chunks, 1):
-                    rag_context_parts.append(f"\n--- Policy Snippet {i} [{c.source_file}] ---\n{c.content}")
-                rag_context = "\n".join(rag_context_parts)
+            query = f"compliance rules regarding: {transcript}"
+            retrieved_chunks = self._retriever.retrieve(query, top_k=RAG_TOP_K, domain=domain)
+            
+            if not retrieved_chunks:
+                # Fail safely if absolutely no rules can be retrieved
+                logger.warning("No policies retrieved for domain=%s. Failing safely.", domain)
+                return ComplianceResult(
+                    violation=False,
+                    risk_level="low",
+                    confidence=0.1,
+                    reason="No relevant regulatory policies could be retrieved for this transcript.",
+                    suggestion="Ensure policies are loaded for this domain.",
+                    debug=DebugInfo(
+                        matched_rule="COMPLIANT",
+                        reasoning_summary="No policies found.",
+                        retrieved_policies=[],
+                    ) if debug else None,
+                )
+                
+            top_score = retrieved_chunks[0][1]
+            retrieved_snippets = [f"{c.source_file} (score: {score:.2f})" for c, score in retrieved_chunks]
+            
+            rag_context_parts = ["=== RELEVANT REGULATORY POLICIES ==="]
+            rag_context_parts.append(
+                "ONLY use the provided policy context. If no relevant policy is found, "
+                "or the context doesn't cover the transcript, return violation=false."
+            )
+            for i, (chunk, score) in enumerate(retrieved_chunks, 1):
+                rag_context_parts.append(f"\n--- Policy Snippet {i} [{chunk.source_file}] ---\n{chunk.content}")
+            rag_context = "\n".join(rag_context_parts)
 
         # Compose the effective system prompt
         system_prompt = SYSTEM_PROMPT
@@ -481,4 +505,9 @@ class ComplianceEngine:
             result.violation,
             result.risk_level,
         )
+        
+        # Combine LLM confidence with the top retrieval score
+        if rag_context is not None and top_score > 0.0:
+            result.confidence = round((result.confidence + top_score) / 2.0, 4)
+            
         return result

@@ -34,8 +34,18 @@ def mock_llm_client() -> MagicMock:
 
 
 @pytest.fixture()
-def engine(mock_llm_client: MagicMock) -> ComplianceEngine:
-    return ComplianceEngine(llm_client=mock_llm_client, use_fallback_on_error=False)
+def mock_retriever() -> MagicMock:
+    """Return a mock retriever that returns a dummy chunk and score."""
+    from compliance_engine.rag import PolicyChunk, PolicyRetriever
+    retriever = MagicMock(spec=PolicyRetriever)
+    chunk = PolicyChunk(source_file="dummy.txt", content="Dummy rule.", domain="fintech")
+    retriever.retrieve.return_value = [(chunk, 0.95)]
+    return retriever
+
+
+@pytest.fixture()
+def engine(mock_llm_client: MagicMock, mock_retriever: MagicMock) -> ComplianceEngine:
+    return ComplianceEngine(llm_client=mock_llm_client, retriever=mock_retriever, use_fallback_on_error=False)
 
 
 def _make_raw(
@@ -268,10 +278,10 @@ class TestComplianceEngineAnalyse:
         call_kwargs = mock_llm_client.chat.call_args[1]
         assert call_kwargs["system_prompt"].startswith("Policy chunk here.")
 
-    def test_fallback_on_parse_error(self, mock_llm_client):
+    def test_fallback_on_parse_error(self, mock_llm_client, mock_retriever):
         """Engine in fallback mode returns medium-risk result instead of raising."""
         mock_llm_client.chat.return_value = "This is not JSON at all."
-        safe_engine = ComplianceEngine(llm_client=mock_llm_client, use_fallback_on_error=True)
+        safe_engine = ComplianceEngine(llm_client=mock_llm_client, retriever=mock_retriever, use_fallback_on_error=True)
         result = safe_engine.analyse("Some transcript.", "fintech")
         assert result.violation is True
         assert result.risk_level == "medium"
@@ -283,7 +293,7 @@ class TestComplianceEngineAnalyse:
         result = engine.analyse("Transcript.", "fintech")
         d = result.to_dict()
         assert "confidence" in d
-        assert d["confidence"] == 0.88
+        assert d["confidence"] == 0.915
 
     def test_to_dict_excludes_raw_response(self, engine, mock_llm_client):
         mock_llm_client.chat.return_value = _make_raw(False, "low", "OK", "No action required.")

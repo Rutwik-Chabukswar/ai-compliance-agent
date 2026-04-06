@@ -55,10 +55,10 @@ class PolicyRetriever:
                 logger.debug("Embedded %d/%d chunks...", i + 1, len(self.chunks))
         logger.info("Index built successfully.")
 
-    def retrieve(self, query: str, top_k: int = 3) -> List[PolicyChunk]:
+    def retrieve(self, query: str, top_k: int = 3, domain: str | None = None) -> List[Tuple[PolicyChunk, float]]:
         """
         Embed the transcript and return the `top_k` most semantically similar
-        policy chunks.
+        policy chunks alongside their similarity scores.
         """
         if not self.chunks:
             return []
@@ -69,11 +69,13 @@ class PolicyRetriever:
         # Compute scores against all indexed chunks
         scored_chunks: List[Tuple[float, PolicyChunk]] = []
         for vec, chunk in zip(self.vectors, self.chunks):
+            if domain and chunk.domain and chunk.domain.lower() != domain.lower():
+                continue
+            
             sim = cosine_similarity(query_vec, vec)
             scored_chunks.append((sim, chunk))
 
         # Sort descending by similarity
         scored_chunks.sort(key=lambda x: x[0], reverse=True)
-        top_chunks = [chunk for score, chunk in scored_chunks[:top_k]]
         
-        return top_chunks
+        return [(chunk, score) for score, chunk in scored_chunks[:top_k]]

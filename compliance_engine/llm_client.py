@@ -1,37 +1,22 @@
 """
 llm_client.py
 -------------
-Thin, opinionated wrapper around the OpenAI Chat Completions API.
+Local rule-based compliance engine for fully offline FREE MODE.
 
-Design goals
-~~~~~~~~~~~~
-* Single responsibility: send a chat prompt → receive a text response.
-* Configurable model so we can point at any OpenAI-compatible endpoint
-  (e.g., locally-hosted OSS models via vLLM / LM Studio).
-* Graceful retry with exponential back-off for transient 5xx / network errors.
-* Hard timeout so a stalled request never blocks the caller indefinitely.
-* Structured logging at every step for production observability.
-
-Future RAG integration point
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-``LLMClient.chat()`` accepts an optional ``system_context`` kwarg that is
-prepended to the system prompt. A RAG retrieval step can populate this with
-domain-specific policy chunks before calling the engine.
+This module preserves the existing LLMClient interface while replacing
+external API calls with a simple, local phrase matcher.
 """
 
+import json
 import logging
-import time
-from typing import Optional
-
-import openai
-from openai import OpenAI, APIConnectionError, APIStatusError, RateLimitError
+import re
+from dataclasses import dataclass
+from typing import Any, Optional
 
 from compliance_engine.config import (
     DEFAULT_MODEL,
     MAX_RETRIES,
     MAX_TOKENS,
-    OPENAI_API_KEY,
-    OPENAI_BASE_URL,
     REQUEST_TIMEOUT_SECONDS,
     RETRY_BACKOFF_FACTOR,
     TEMPERATURE,
@@ -40,52 +25,55 @@ from compliance_engine.config import (
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class LLMResponse:
+    """Local rule-based compliance analysis result."""
+
+    violation: bool
+    confidence: float
+    reason: str
+    debug: Optional[dict[str, Any]] = None
+
+
 class LLMClientError(Exception):
-    """Raised when the LLM client cannot produce a response after all retries."""
+    """Raised when the local LLM client cannot produce a response."""
 
 
 class LLMClient:
     """
-    Wrapper around ``openai.OpenAI`` that adds retry logic and timeout control.
+    Offline compliance client that performs local rule-based analysis.
 
     Parameters
     ----------
     model:
-        Model identifier (e.g. ``"gpt-4o"``, ``"gpt-4o-mini"``,
-        ``"neuralmagic/Meta-Llama-3.1-70B-Instruct-FP8"``).
+        Placeholder model identifier for compatibility.
     api_key:
-        OpenAI API key. Defaults to ``config.OPENAI_API_KEY``.
+        Ignored in offline mode.
     base_url:
-        API base URL. Override to point at a local vLLM / Ollama endpoint.
+        Ignored in offline mode.
     temperature:
-        Sampling temperature. Keep at 0.0 for deterministic compliance output.
+        Ignored in offline mode.
     max_tokens:
-        Upper bound on response tokens.
+        Ignored in offline mode.
     max_retries:
-        Number of retry attempts on transient failures.
+        Ignored in offline mode.
     timeout:
-        Per-request timeout in seconds.
+        Ignored in offline mode.
     retry_backoff:
-        Multiplicative back-off factor between successive retries.
+        Ignored in offline mode.
     """
 
     def __init__(
         self,
         model: str = DEFAULT_MODEL,
-        api_key: str = OPENAI_API_KEY,
-        base_url: str = OPENAI_BASE_URL,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
         temperature: float = TEMPERATURE,
         max_tokens: int = MAX_TOKENS,
         max_retries: int = MAX_RETRIES,
         timeout: int = REQUEST_TIMEOUT_SECONDS,
         retry_backoff: float = RETRY_BACKOFF_FACTOR,
     ) -> None:
-        if not api_key:
-            raise ValueError(
-                "No OpenAI API key provided. "
-                "Set OPENAI_API_KEY in your environment or pass api_key= explicitly."
-            )
-
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -93,23 +81,89 @@ class LLMClient:
         self.timeout = timeout
         self.retry_backoff = retry_backoff
 
-        self._client = OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=float(timeout),
-            max_retries=0,  # We handle retries ourselves for full observability.
-        )
+        logger.info("LLMClient initialized in FULLY OFFLINE FREE MODE")
 
-        logger.info(
-            "LLMClient initialised | model=%s | temperature=%s | timeout=%ds",
-            self.model,
-            self.temperature,
-            self.timeout,
-        )
+    def analyse(
+        self,
+        transcript: str,
+        context: Optional[str] = None,
+        debug: bool = False,
+    ) -> LLMResponse:
+        """
+        Perform rule-based compliance analysis locally.
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+        Parameters
+        ----------
+        transcript:
+            The transcript text to evaluate.
+        context:
+            Optional policy context that may increase confidence.
+        debug:
+            When ``True``, include local reasoning metadata for debugging.
+
+        Returns
+        -------
+        LLMResponse
+            Local analysis result.
+        """
+        text = transcript.lower()
+
+        high_risk_phrases = [
+            "guaranteed return",
+            "no risk",
+            "zero risk",
+            "risk free",
+            "assured profit",
+        ]
+        medium_risk_phrases = [
+            "high returns",
+            "limited time offer",
+            "exclusive deal",
+        ]
+
+        if any(phrase in text for phrase in high_risk_phrases) or (
+            "guarantee" in text and "return" in text
+        ):
+            violation = True
+            confidence = 0.9
+            reason = "Detected a high-risk financial claim."
+            matched_rule = "MISLEADING_GUARANTEE"
+            reasoning_summary = "The transcript contains a prohibited guaranteed return claim."
+        elif any(phrase in text for phrase in medium_risk_phrases):
+            violation = True
+            confidence = 0.6
+            reason = "Detected a medium-risk promotional claim."
+            matched_rule = "MISLEADING_GUARANTEE"
+            reasoning_summary = "The transcript contains a potentially misleading promotional claim."
+        else:
+            violation = False
+            confidence = 0.1
+            reason = "No explicit high-risk or medium-risk claim detected."
+            matched_rule = "COMPLIANT"
+            reasoning_summary = "No disallowed claims were identified in the transcript."
+
+        if context:
+            query_words = set(re.findall(r"\b[a-z0-9]+\b", text))
+            context_words = set(re.findall(r"\b[a-z0-9]+\b", context.lower()))
+            if query_words and context_words:
+                overlap = len(query_words.intersection(context_words))
+                if overlap > 0:
+                    confidence = min(1.0, confidence + 0.1)
+                    reason += " Matching policy context increased confidence."
+
+        debug_payload: Optional[dict[str, Any]] = None
+        if debug:
+            debug_payload = {
+                "matched_rule": matched_rule,
+                "reasoning_summary": reasoning_summary,
+            }
+
+        return LLMResponse(
+            violation=violation,
+            confidence=confidence,
+            reason=reason,
+            debug=debug_payload,
+        )
 
     def chat(
         self,
@@ -118,109 +172,16 @@ class LLMClient:
         system_context: Optional[str] = None,
     ) -> str:
         """
-        Send a chat-completion request and return the assistant's text reply.
+        Compatibility wrapper that returns JSON output.
 
-        Parameters
-        ----------
-        system_prompt:
-            The base system instruction (role definition + output format).
-        user_prompt:
-            The user turn containing the transcript and domain.
-        system_context:
-            Optional extra context injected at the top of the system prompt
-            (intended for RAG-retrieved policy chunks in future iterations).
-
-        Returns
-        -------
-        str
-            Raw text content of the first choice's message.
-
-        Raises
-        ------
-        LLMClientError
-            If all retry attempts are exhausted without a successful response.
+        Existing callers may still invoke `.chat()`, so this maintains the
+        legacy interface while delegating to offline analysis.
         """
-        effective_system = (
-            f"{system_context}\n\n{system_prompt}" if system_context else system_prompt
+        result = self.analyse(transcript=user_prompt, context=system_context)
+        return json.dumps(
+            {
+                "violation": result.violation,
+                "confidence": result.confidence,
+                "reason": result.reason,
+            }
         )
-
-        messages = [
-            {"role": "system", "content": effective_system},
-            {"role": "user", "content": user_prompt},
-        ]
-
-        attempt = 0
-        last_error: Exception = RuntimeError("No attempts made")
-
-        while attempt < self.max_retries:
-            attempt += 1
-            try:
-                logger.debug(
-                    "LLM request attempt %d/%d | model=%s",
-                    attempt,
-                    self.max_retries,
-                    self.model,
-                )
-                response = self._client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,  # type: ignore[arg-type]
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                    response_format={"type": "json_object"},  # enforce JSON mode
-                )
-                content = response.choices[0].message.content or ""
-                logger.debug(
-                    "LLM response received | tokens_used=%s | preview=%s",
-                    response.usage.total_tokens if response.usage else "?",
-                    content[:120],
-                )
-                return content
-
-            except RateLimitError as exc:
-                logger.warning(
-                    "Rate limit hit on attempt %d/%d – backing off.",
-                    attempt,
-                    self.max_retries,
-                )
-                last_error = exc
-
-            except APIConnectionError as exc:
-                logger.warning(
-                    "Connection error on attempt %d/%d: %s",
-                    attempt,
-                    self.max_retries,
-                    exc,
-                )
-                last_error = exc
-
-            except APIStatusError as exc:
-                # 5xx → retryable; 4xx (except 429) → fatal
-                if exc.status_code >= 500:
-                    logger.warning(
-                        "Server error %d on attempt %d/%d: %s",
-                        exc.status_code,
-                        attempt,
-                        self.max_retries,
-                        exc.message,
-                    )
-                    last_error = exc
-                else:
-                    logger.error(
-                        "Non-retryable API error %d: %s",
-                        exc.status_code,
-                        exc.message,
-                    )
-                    raise LLMClientError(
-                        f"Non-retryable API error {exc.status_code}: {exc.message}"
-                    ) from exc
-
-            # Exponential back-off (skip sleep after the last attempt)
-            if attempt < self.max_retries:
-                sleep_time = self.retry_backoff ** attempt
-                logger.debug("Sleeping %.2fs before next retry.", sleep_time)
-                time.sleep(sleep_time)
-
-        raise LLMClientError(
-            f"LLM request failed after {self.max_retries} attempts. "
-            f"Last error: {last_error}"
-        ) from last_error

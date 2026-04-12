@@ -503,23 +503,63 @@ class ComplianceEngine:
         if rag_context:
             system_prompt = rag_context + "\n\n" + system_prompt
 
+        if rag_context is not None and not raw_policy_text:
+            raw_policy_text = rag_context
+
         try:
-            raw = self._client.chat(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
+            llm_result = self._client.analyse(
+                transcript=transcript.strip(),
+                context=raw_policy_text,
+                debug=debug,
             )
-        except LLMClientError as exc:
-            logger.error("LLM call failed: %s", exc)
+        except Exception as exc:
+            logger.error("Local LLM analysis failed: %s", exc)
             if self._use_fallback:
                 return _fallback_result("", exc)
             raise
 
-        try:
-            result = _parse_llm_response(raw, expect_debug=debug)
-        except ComplianceValidationError as exc:
-            if self._use_fallback:
-                return _fallback_result(raw, exc)
-            raise
+        result_debug = None
+        if debug and getattr(llm_result, "debug", None) is not None:
+            raw_debug = llm_result.debug
+            if isinstance(raw_debug, dict):
+                matched_rule = str(raw_debug.get("matched_rule", "")).strip().upper()
+                if matched_rule not in VALID_MATCHED_RULES:
+                    logger.warning(
+                        "Unknown matched_rule '%s'; keeping value as-is.", matched_rule
+                    )
+                result_debug = DebugInfo(
+                    matched_rule=matched_rule or "UNKNOWN",
+                    reasoning_summary=str(raw_debug.get("reasoning_summary", "")).strip(),
+                )
+            elif isinstance(raw_debug, DebugInfo):
+                result_debug = raw_debug
+
+        result = ComplianceResult(
+            violation=llm_result.violation,
+            risk_level=(
+                "high"
+                if llm_result.violation and llm_result.confidence >= 0.8
+                else "medium"
+                if llm_result.violation
+                else "low"
+            ),
+            confidence=llm_result.confidence,
+            reason=llm_result.reason,
+            suggestion=(
+                "Review the transcript for potentially misleading or prohibited claims."
+                if llm_result.violation
+                else "No action required."
+            ),
+            debug=result_debug,
+            raw_response=json.dumps(
+                {
+                    "violation": llm_result.violation,
+                    "confidence": llm_result.confidence,
+                    "reason": llm_result.reason,
+                    **({"debug": llm_result.debug} if getattr(llm_result, "debug", None) is not None else {}),
+                }
+            ),
+        )
 
         # Grounding Validation Layer
         if rag_context is not None and raw_policy_text:

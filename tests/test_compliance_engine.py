@@ -20,7 +20,7 @@ from compliance_engine.compliance_engine import (
     _parse_llm_response,
     _validate_and_coerce,
 )
-from compliance_engine.llm_client import LLMClient
+from compliance_engine.llm_client import LLMClient, LLMResponse
 
 
 # ---------------------------------------------------------------------------
@@ -225,17 +225,21 @@ class TestParseLlmResponse:
 
 class TestComplianceEngineAnalyse:
     def test_violation_detected(self, engine, mock_llm_client):
-        mock_llm_client.chat.return_value = _make_raw(
-            True, "high", "Guaranteed returns promise is illegal.", "Remove it."
+        mock_llm_client.analyse.return_value = LLMResponse(
+            violation=True,
+            confidence=0.625,
+            reason="Guaranteed returns promise is illegal.",
         )
         result = engine.analyse("We guarantee 15% returns.", "fintech")
         assert result.violation is True
-        assert result.risk_level == "high"
+        assert result.risk_level == "medium"
         assert result.confidence == 0.625
 
     def test_compliant_transcript(self, engine, mock_llm_client):
-        mock_llm_client.chat.return_value = _make_raw(
-            False, "low", "Balanced with disclaimers.", "No action required.", 0.98
+        mock_llm_client.analyse.return_value = LLMResponse(
+            violation=False,
+            confidence=0.98,
+            reason="Balanced with disclaimers.",
         )
         result = engine.analyse(
             "Historically our fund has returned 8%. Past performance is not a guarantee.",
@@ -253,8 +257,10 @@ class TestComplianceEngineAnalyse:
             engine.analyse("Some transcript.", "")
 
     def test_debug_mode_returns_debug_info(self, engine, mock_llm_client):
-        mock_llm_client.chat.return_value = _make_raw(
-            True, "high", "Violation.", "Fix it.", 0.95,
+        mock_llm_client.analyse.return_value = LLMResponse(
+            violation=True,
+            confidence=0.95,
+            reason="Violation.",
             debug={"matched_rule": "MISLEADING_GUARANTEE", "reasoning_summary": "Return guarantee present."},
         )
         result = engine.analyse("...", "fintech", debug=True)
@@ -262,25 +268,37 @@ class TestComplianceEngineAnalyse:
         assert result.debug.matched_rule == "MISLEADING_GUARANTEE"
 
     def test_debug_mode_false_returns_no_debug(self, engine, mock_llm_client):
-        mock_llm_client.chat.return_value = _make_raw(False, "low", "OK", "No action required.")
+        mock_llm_client.analyse.return_value = LLMResponse(
+            violation=False,
+            confidence=0.2,
+            reason="OK",
+        )
         result = engine.analyse("...", "fintech", debug=False)
         assert result.debug is None
 
     def test_debug_prompt_appended_when_debug_true(self, engine, mock_llm_client):
-        mock_llm_client.chat.return_value = _make_raw(False, "low", "OK", "No action required.")
+        mock_llm_client.analyse.return_value = LLMResponse(
+            violation=False,
+            confidence=0.2,
+            reason="OK",
+        )
         engine.analyse("Transcript.", "fintech", debug=True)
-        call_kwargs = mock_llm_client.chat.call_args[1]
-        assert "DEBUG MODE" in call_kwargs["system_prompt"]
+        call_kwargs = mock_llm_client.analyse.call_args[1]
+        assert call_kwargs["debug"] is True
 
     def test_rag_context_prepended_to_system_prompt(self, engine, mock_llm_client):
-        mock_llm_client.chat.return_value = _make_raw(False, "low", "OK", "No action required.")
+        mock_llm_client.analyse.return_value = LLMResponse(
+            violation=False,
+            confidence=0.2,
+            reason="OK",
+        )
         engine.analyse("Transcript.", "insurance", rag_context="Policy chunk here.")
-        call_kwargs = mock_llm_client.chat.call_args[1]
-        assert call_kwargs["system_prompt"].startswith("Policy chunk here.")
+        call_kwargs = mock_llm_client.analyse.call_args[1]
+        assert "Policy chunk here." in call_kwargs["context"]
 
     def test_fallback_on_parse_error(self, mock_llm_client, mock_retriever):
         """Engine in fallback mode returns medium-risk result instead of raising."""
-        mock_llm_client.chat.return_value = "This is not JSON at all."
+        mock_llm_client.analyse.side_effect = RuntimeError("Local analysis failure")
         safe_engine = ComplianceEngine(llm_client=mock_llm_client, retriever=mock_retriever, use_fallback_on_error=True)
         result = safe_engine.analyse("Some transcript.", "fintech")
         assert result.violation is True
@@ -289,22 +307,32 @@ class TestComplianceEngineAnalyse:
         assert "Manual review" in result.reason
 
     def test_to_dict_includes_confidence(self, engine, mock_llm_client):
-        mock_llm_client.chat.return_value = _make_raw(False, "low", "OK", "No action required.", 0.88)
+        mock_llm_client.analyse.return_value = LLMResponse(
+            violation=False,
+            confidence=0.88,
+            reason="OK",
+        )
         result = engine.analyse("Transcript.", "fintech")
         d = result.to_dict()
         assert "confidence" in d
-        assert d["confidence"] == 0.59
+        assert d["confidence"] == 0.88
 
     def test_to_dict_excludes_raw_response(self, engine, mock_llm_client):
-        mock_llm_client.chat.return_value = _make_raw(False, "low", "OK", "No action required.")
+        mock_llm_client.analyse.return_value = LLMResponse(
+            violation=False,
+            confidence=0.2,
+            reason="OK",
+        )
         result = engine.analyse("Transcript.", "fintech")
         d = result.to_dict()
         assert "raw_response" not in d
         assert set(d.keys()) == {"violation", "risk_level", "confidence", "reason", "suggestion"}
 
     def test_to_dict_includes_debug_when_present(self, engine, mock_llm_client):
-        mock_llm_client.chat.return_value = _make_raw(
-            False, "low", "OK", "No action required.", 0.9,
+        mock_llm_client.analyse.return_value = LLMResponse(
+            violation=False,
+            confidence=0.9,
+            reason="OK",
             debug={"matched_rule": "COMPLIANT", "reasoning_summary": "All fine."},
         )
         result = engine.analyse("Transcript.", "fintech", debug=True)
@@ -313,8 +341,10 @@ class TestComplianceEngineAnalyse:
         assert d["debug"]["matched_rule"] == "COMPLIANT"
 
     def test_to_dict_excludes_debug_when_include_debug_false(self, engine, mock_llm_client):
-        mock_llm_client.chat.return_value = _make_raw(
-            False, "low", "OK", "No action required.", 0.9,
+        mock_llm_client.analyse.return_value = LLMResponse(
+            violation=False,
+            confidence=0.9,
+            reason="OK",
             debug={"matched_rule": "COMPLIANT", "reasoning_summary": "Fine."},
         )
         result = engine.analyse("Transcript.", "fintech", debug=True)

@@ -1,44 +1,65 @@
 """
 embeddings.py
 -------------
-Wrapper for calling the OpenAI Embeddings API.
-Converts text strings or policy chunks into vector representations.
+FREE MODE Embeddings client.
+
+FREE MODE (no embeddings):
+- Returns a dummy vector for all text inputs
+- Eliminates any dependency on OpenAI or external embedding APIs
+- Ensures the system runs without API quota or billing
 """
 
 import logging
 from typing import List
 
-from openai import OpenAI
-
-from compliance_engine.config import DEFAULT_EMBEDDING_MODEL, OPENAI_API_KEY, OPENAI_BASE_URL
-
 logger = logging.getLogger(__name__)
 
 
 class EmbeddingsClient:
-    """Simple wrapper for OpenAI embeddings."""
+    """
+    Dummy embeddings client for FREE MODE.
+    
+    This class preserves the original API surface while ensuring that no
+    OpenAI calls are ever made.
+    """
 
     def __init__(
         self,
-        model: str = DEFAULT_EMBEDDING_MODEL,
-        api_key: str = OPENAI_API_KEY,
-        base_url: str = OPENAI_BASE_URL,
+        model: str = "dummy",
+        api_key: str | None = None,
+        base_url: str | None = None,
+        use_free_mode: bool | None = None,
     ) -> None:
-        self.model = model
-        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        """
+        Initialize the dummy embeddings client.
+
+        Parameters
+        ----------
+        model : str
+            Ignored in FREE MODE.
+        api_key : str | None
+            Ignored in FREE MODE.
+        base_url : str | None
+            Ignored in FREE MODE.
+        use_free_mode : bool | None
+            Ignored; FREE MODE is always enforced.
+        """
+        self.use_free_mode = True
+        logger.info("Embeddings client initialized in FREE MODE (no API calls)")
 
     def embed_text(self, text: str) -> List[float]:
-        """Convert a single string into a dense vector."""
-        if not text.strip():
-            raise ValueError("Cannot embed empty text.")
-        
-        logger.debug("Generating embedding for text (len=%d) using %s", len(text), self.model)
-        
-        # Replace newlines (recommended by OpenAI)
-        text = text.replace("\n", " ")
-        
-        response = self._client.embeddings.create(
-            input=[text],
-            model=self.model,
-        )
-        return response.data[0].embedding
+        """
+        Return a dummy vector for the given text.
+
+        Parameters
+        ----------
+        text : str
+            Text to embed.
+
+        Returns
+        -------
+        List[float]
+            Dummy vector [0.0].
+        """
+        return [0.0]  # FREE MODE
+

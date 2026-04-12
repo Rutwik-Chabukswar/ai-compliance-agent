@@ -9,7 +9,7 @@ description = "AI-powered compliance detection engine for regulated industries"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-dependencies = ["openai>=1.25.0"]
+dependencies = []
 
 [project.scripts]
 compliance-check = "cli:main"

@@ -1,0 +1,241 @@
+{
+  "summary": {
+    "total": 13,
+    "evaluated": 13,
+    "errors": 0,
+    "correct": 7,
+    "accuracy": 0.538462,
+    "precision": 0.666667,
+    "recall": 0.285714,
+    "f1_score": 0.4,
+    "true_positives": 2,
+    "true_negatives": 5,
+    "false_positives": 1,
+    "false_negatives": 5,
+    "false_positive_rate": 0.166667,
+    "false_negative_rate": 0.714286
+  },
+  "cases": [
+    {
+      "id": "V01",
+      "domain": "fintech",
+      "category": "Misleading Guarantee \u2013 explicit return guarantee",
+      "expected_violation": true,
+      "predicted_violation": true,
+      "correct": true,
+      "confidence": 0.95,
+      "result": {
+        "violation": true,
+        "risk_level": "high",
+        "confidence": 0.95,
+        "reason": "Detected guaranteed return or zero-risk claim, which is prohibited.",
+        "suggestion": "Remove guaranteed return language and add appropriate risk disclosures."
+      },
+      "error": null
+    },
+    {
+      "id": "V02",
+      "domain": "fintech",
+      "category": "Missing Mandatory Disclosure \u2013 performance without risk disclaimer",
+      "expected_violation": true,
+      "predicted_violation": false,
+      "correct": false,
+      "confidence": 0.85,
+      "result": {
+        "violation": false,
+        "risk_level": "low",
+        "confidence": 0.85,
+        "reason": "No explicit high-risk claims detected in transcript.",
+        "suggestion": "No action required."
+      },
+      "error": null
+    },
+    {
+      "id": "V03",
+      "domain": "insurance",
+      "category": "Misleading Guarantee \u2013 absolute coverage promise",
+      "expected_violation": true,
+      "predicted_violation": false,
+      "correct": false,
+      "confidence": 0.425,
+      "result": {
+        "violation": false,
+        "risk_level": "low",
+        "confidence": 0.425,
+        "reason": "No explicit high-risk claims detected in transcript.",
+        "suggestion": "No action required."
+      },
+      "error": null
+    },
+    {
+      "id": "V04",
+      "domain": "healthcare",
+      "category": "Illegal Claim \u2013 false cure and fabricated FDA approval",
+      "expected_violation": true,
+      "predicted_violation": false,
+      "correct": false,
+      "confidence": 0.85,
+      "result": {
+        "violation": false,
+        "risk_level": "low",
+        "confidence": 0.85,
+        "reason": "No explicit high-risk claims detected in transcript.",
+        "suggestion": "No action required."
+      },
+      "error": null
+    },
+    {
+      "id": "V05",
+      "domain": "fintech",
+      "category": "Misleading Guarantee \u2013 implied guaranteed future performance",
+      "expected_violation": true,
+      "predicted_violation": false,
+      "correct": false,
+      "confidence": 0.85,
+      "result": {
+        "violation": false,
+        "risk_level": "low",
+        "confidence": 0.85,
+        "reason": "No explicit high-risk claims detected in transcript.",
+        "suggestion": "No action required."
+      },
+      "error": null
+    },
+    {
+      "id": "V06",
+      "domain": "fintech",
+      "category": "Misleading Guarantee \u2013 'risk-free' claim with disclaimer contradiction",
+      "expected_violation": true,
+      "predicted_violation": true,
+      "correct": true,
+      "confidence": 0.95,
+      "result": {
+        "violation": true,
+        "risk_level": "high",
+        "confidence": 0.95,
+        "reason": "Detected guaranteed return or zero-risk claim, which is prohibited.",
+        "suggestion": "Remove guaranteed return language and add appropriate risk disclosures."
+      },
+      "error": null
+    },
+    {
+      "id": "V07",
+      "domain": "healthcare",
+      "category": "Illegal Claim \u2013 fabricated clinical trial outcome",
+      "expected_violation": true,
+      "predicted_violation": false,
+      "correct": false,
+      "confidence": 0.85,
+      "result": {
+        "violation": false,
+        "risk_level": "low",
+        "confidence": 0.85,
+        "reason": "No explicit high-risk claims detected in transcript.",
+        "suggestion": "No action required."
+      },
+      "error": null
+    },
+    {
+      "id": "S01",
+      "domain": "fintech",
+      "category": "Safe \u2013 historical data with required disclaimer",
+      "expected_violation": false,
+      "predicted_violation": true,
+      "correct": false,
+      "confidence": 0.95,
+      "result": {
+        "violation": true,
+        "risk_level": "high",
+        "confidence": 0.95,
+        "reason": "Detected guaranteed return or zero-risk claim, which is prohibited.",
+        "suggestion": "Remove guaranteed return language and add appropriate risk disclosures."
+      },
+      "error": null
+    },
+    {
+      "id": "S02",
+      "domain": "insurance",
+      "category": "Safe \u2013 general description with coverage caveat",
+      "expected_violation": false,
+      "predicted_violation": false,
+      "correct": true,
+      "confidence": 0.425,
+      "result": {
+        "violation": false,
+        "risk_level": "low",
+        "confidence": 0.425,
+        "reason": "No explicit high-risk claims detected in transcript.",
+        "suggestion": "No action required."
+      },
+      "error": null
+    },
+    {
+      "id": "S03",
+      "domain": "healthcare",
+      "category": "Safe \u2013 qualified supplement claim with FDA disclaimer",
+      "expected_violation": false,
+      "predicted_violation": false,
+      "correct": true,
+      "confidence": 0.85,
+      "result": {
+        "violation": false,
+        "risk_level": "low",
+        "confidence": 0.85,
+        "reason": "No explicit high-risk claims detected in transcript.",
+        "suggestion": "No action required."
+      },
+      "error": null
+    },
+    {
+      "id": "A01",
+      "domain": "insurance",
+      "category": "Ambiguous \u2013 superlative marketing language, no guarantee",
+      "expected_violation": false,
+      "predicted_violation": false,
+      "correct": true,
+      "confidence": 0.425,
+      "result": {
+        "violation": false,
+        "risk_level": "low",
+        "confidence": 0.425,
+        "reason": "No explicit high-risk claims detected in transcript.",
+        "suggestion": "No action required."
+      },
+      "error": null
+    },
+    {
+      "id": "A02",
+      "domain": "fintech",
+      "category": "Ambiguous \u2013 vague performance anecdote, no specific guarantee",
+      "expected_violation": false,
+      "predicted_violation": false,
+      "correct": true,
+      "confidence": 0.425,
+      "result": {
+        "violation": false,
+        "risk_level": "low",
+        "confidence": 0.425,
+        "reason": "No explicit high-risk claims detected in transcript.",
+        "suggestion": "No action required."
+      },
+      "error": null
+    },
+    {
+      "id": "A03",
+      "domain": "healthcare",
+      "category": "Ambiguous \u2013 anecdotal testimonial with 'results may vary' qualifier",
+      "expected_violation": false,
+      "predicted_violation": false,
+      "correct": true,
+      "confidence": 0.85,
+      "result": {
+        "violation": false,
+        "risk_level": "low",
+        "confidence": 0.85,
+        "reason": "No explicit high-risk claims detected in transcript.",
+        "suggestion": "No action required."
+      },
+      "error": null
+    }
+  ]
+}

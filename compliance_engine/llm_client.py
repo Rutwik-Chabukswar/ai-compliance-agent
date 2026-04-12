@@ -16,6 +16,7 @@ interface while providing a clean, production-grade implementation.
 
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -109,7 +110,7 @@ class LLMClient:
         self.use_fallback_on_error = use_fallback_on_error
 
         # Detect API availability
-        self.api_key = api_key or OPENAI_API_KEY
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.base_url = base_url or OPENAI_BASE_URL
         self.llm_available = HAS_OPENAI and bool(self.api_key)
 
@@ -122,13 +123,7 @@ class LLMClient:
                     base_url=self.base_url if self.base_url else None,
                     timeout=self.timeout,
                 )
-                logger.info(
-                    "LLMClient initialized with LLM mode enabled (model=%s, "
-                    "timeout=%ds, max_retries=%d)",
-                    self.model,
-                    self.timeout,
-                    self.max_retries,
-                )
+                logger.info("LLMClient initialized in OPENAI mode")
             except Exception as e:
                 logger.warning(
                     "Failed to initialize OpenAI client: %s. Falling back to "
@@ -138,10 +133,7 @@ class LLMClient:
                 self.llm_available = False
                 self.client = None
         else:
-            logger.info(
-                "LLMClient initialized with RULE-BASED FALLBACK mode "
-                "(no API key or openai library unavailable)"
-            )
+            logger.info("LLMClient using fallback mode")
 
     def chat(
         self,
@@ -184,10 +176,13 @@ class LLMClient:
         # Attempt LLM-based analysis first
         if self.llm_available and self.client is not None:
             try:
-                response_text = self._call_llm_with_retry(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    system_context=system_context,
+                full_prompt = system_prompt
+                if system_context:
+                    full_prompt = f"{system_prompt}\n\n{system_context}"
+                full_prompt = f"{full_prompt}\n\nTranscript:\n{user_prompt}"
+
+                response_text = self._call_llm(
+                    prompt=full_prompt
                 )
                 parsed = self._parse_response(response_text)
                 logger.debug("LLM analysis succeeded for transcript length=%d", len(user_prompt))
@@ -269,12 +264,7 @@ class LLMClient:
     # Private: LLM Integration
     # =========================================================================
 
-    def _call_llm_with_retry(
-        self,
-        system_prompt: str,
-        user_prompt: str,
-        system_context: Optional[str] = None,
-    ) -> str:
+    def _call_llm(self, prompt: str) -> str:
         """
         Call OpenAI API with retry logic and exponential backoff.
 
@@ -283,12 +273,8 @@ class LLMClient:
 
         Parameters
         ----------
-        system_prompt : str
-            System-level instructions.
-        user_prompt : str
-            User text to process.
-        system_context : str, optional
-            Additional system context.
+        prompt : str
+            Combined prompt containing context and transcript.
 
         Returns
         -------
@@ -302,11 +288,6 @@ class LLMClient:
         """
         if not self.client:
             raise LLMClientError("OpenAI client is not initialized")
-
-        # Combine system prompt with context if provided
-        full_system_prompt = system_prompt
-        if system_context:
-            full_system_prompt = f"{system_prompt}\n\n{system_context}"
 
         attempt = 0
         last_error = None
@@ -325,12 +306,10 @@ class LLMClient:
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[
-                        {"role": "system", "content": full_system_prompt},
-                        {"role": "user", "content": user_prompt},
+                        {"role": "system", "content": "You are a strict compliance officer."},
+                        {"role": "user", "content": prompt}
                     ],
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                    timeout=self.timeout,
+                    temperature=0
                 )
 
                 # Extract text from response

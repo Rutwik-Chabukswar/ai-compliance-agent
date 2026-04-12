@@ -482,18 +482,25 @@ class ComplianceEngine:
                         retrieved_policies=[],
                     ) if debug else None,
                 )
-                
-            top_score = retrieved_chunks[0][1]
-            raw_policy_text = "\n".join(c.content for c, _ in retrieved_chunks)
-            retrieved_snippets = [f"{c.source_file} (score: {score:.2f})" for c, score in retrieved_chunks]
+            
+            # Extract data from new RetrievedChunk objects
+            top_score = retrieved_chunks[0].score
+            raw_policy_text = "\n".join(r.chunk.content for r in retrieved_chunks)
+            retrieved_snippets = [
+                f"{r.chunk.source_file} (score: {r.score:.2f}, matches: {len(r.matched_keywords)}/{r.query_keyword_count})" 
+                for r in retrieved_chunks
+            ]
             
             rag_context_parts = ["=== RELEVANT REGULATORY POLICIES ==="]
             rag_context_parts.append(
                 "ONLY use the provided policy context. If no relevant policy is found, "
                 "or the context doesn't cover the transcript, return violation=false."
             )
-            for i, (chunk, score) in enumerate(retrieved_chunks, 1):
-                rag_context_parts.append(f"\n--- Policy Snippet {i} [{chunk.source_file}] ---\n{chunk.content}")
+            for i, retrieved in enumerate(retrieved_chunks, 1):
+                rag_context_parts.append(
+                    f"\n--- Policy Snippet {i} [{retrieved.chunk.source_file}] (score: {retrieved.score:.2f}) ---\n"
+                    f"{retrieved.chunk.content}"
+                )
             rag_context = "\n".join(rag_context_parts)
 
         # Compose the effective system prompt

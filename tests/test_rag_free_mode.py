@@ -20,8 +20,8 @@ from unittest.mock import MagicMock
 from compliance_engine.rag.embeddings import EmbeddingsClient
 from compliance_engine.rag.retriever import (
     PolicyRetriever,
-    _extract_keywords,
-    _keyword_similarity,
+    extract_keywords,
+    compute_similarity_score,
 )
 from compliance_engine.rag.loader import PolicyChunk
 from compliance_engine.compliance_engine import ComplianceEngine
@@ -62,62 +62,94 @@ class TestEmbeddingsClientFreeMode:
 
 
 class TestKeywordExtraction:
-    """Test keyword extraction for FREE MODE matching."""
+    """Test keyword extraction for improved retrieval."""
 
     def test_extract_keywords_basic(self):
         """Extract keywords from simple text."""
-        keywords = _extract_keywords("We guarantee 15% returns with zero risk")
-        assert "guarantee" in keywords
-        assert "returns" in keywords
-        assert "risk" in keywords
+        keywords_set, keywords_list = extract_keywords("We guarantee 15% returns with zero risk")
+        assert "guarantee" in keywords_set
+        assert "returns" in keywords_set
+        assert "risk" in keywords_set
 
     def test_extract_keywords_filters_stop_words(self):
         """Stop words should be filtered out."""
-        keywords = _extract_keywords("the and or a an is are")
-        assert len(keywords) == 0  # All are stop words
+        keywords_set, keywords_list = extract_keywords("the and or a an is are")
+        assert len(keywords_set) == 0  # All are stop words
 
     def test_extract_keywords_minimum_length(self):
         """Keywords shorter than min_length should be filtered."""
-        keywords = _extract_keywords("I am going to test this", min_length=3)
+        keywords_set, keywords_list = extract_keywords("I am going to test this", min_length=3)
         # "I" and "am" and "to" are < 3 chars
-        assert "test" in keywords
-        assert "going" in keywords
+        assert "test" in keywords_set
+        assert "going" in keywords_set
 
     def test_extract_keywords_lowercase(self):
         """Keywords should be lowercase."""
-        keywords = _extract_keywords("GUARANTEED RETURNS Risk")
-        assert "guaranteed" in keywords
-        assert "returns" in keywords
-        assert "risk" in keywords
+        keywords_set, keywords_list = extract_keywords("GUARANTEED RETURNS Risk")
+        assert "guaranteed" in keywords_set
+        assert "returns" in keywords_set
+        assert "risk" in keywords_set
 
 
 class TestKeywordSimilarity:
-    """Test keyword-based similarity scoring."""
+    """Test normalized keyword-based similarity scoring."""
 
     def test_similarity_perfect_match(self):
-        """Score should equal the raw overlap count for perfect keyword match."""
+        """Score should normalize to 1.0 for perfect keyword match."""
         query = "fraud compliance review"
         chunk = "This document discusses fraud and compliance and review procedures"
-        score = _keyword_similarity(query, chunk)
-        assert score == 3.0
+        
+        query_keywords_set, _ = extract_keywords(query)
+        chunk_keywords_set, _ = extract_keywords(chunk)
+        score, matched = compute_similarity_score(
+            query_keywords_set,
+            chunk_keywords_set,
+            len(query_keywords_set)
+        )
+        # All 3 query keywords match: fraud, compliance, review
+        assert score == 1.0
+        assert len(matched) == 3
 
     def test_similarity_no_match(self):
         """Score should be 0.0 for no keyword overlap."""
         query = "investment returns"
         chunk = "This is about food preparation and cooking techniques"
-        score = _keyword_similarity(query, chunk)
+        
+        query_keywords_set, _ = extract_keywords(query)
+        chunk_keywords_set, _ = extract_keywords(chunk)
+        score, matched = compute_similarity_score(
+            query_keywords_set,
+            chunk_keywords_set,
+            len(query_keywords_set)
+        )
         assert score == 0.0
+        assert len(matched) == 0
 
     def test_similarity_partial_match(self):
-        """Score should reflect the raw number of matching keywords."""
+        """Score should reflect normalized overlap."""
         query = "guaranteed returns"
         chunk = "Guaranteed returns are illegal"
-        score = _keyword_similarity(query, chunk)
-        assert score == 2.0
+        
+        query_keywords_set, _ = extract_keywords(query)
+        chunk_keywords_set, _ = extract_keywords(chunk)
+        score, matched = compute_similarity_score(
+            query_keywords_set,
+            chunk_keywords_set,
+            len(query_keywords_set)
+        )
+        # 2 out of 2 query keywords match
+        assert score == 1.0
+        assert len(matched) == 2
 
     def test_similarity_empty_query(self):
         """Empty query should return 0.0 score."""
-        score = _keyword_similarity("", "Some chunk content")
+        query_keywords_set, _ = extract_keywords("")
+        chunk_keywords_set, _ = extract_keywords("Some chunk content")
+        score, matched = compute_similarity_score(
+            query_keywords_set,
+            chunk_keywords_set,
+            len(query_keywords_set) or 1  # Prevent division by zero in actual code
+        )
         assert score == 0.0
 
 
@@ -173,8 +205,14 @@ class TestPolicyRetrieverFreeMode:
         )
         
         assert len(results) <= 2
-        assert all(isinstance(chunk, PolicyChunk) for chunk, score in results)
-        assert all(isinstance(score, float) for chunk, score in results)
+        # Check that results are RetrievedChunk objects with expected attributes
+        for result in results:
+            assert hasattr(result, "chunk")
+            assert hasattr(result, "score")
+            assert hasattr(result, "matched_keywords")
+            assert isinstance(result.chunk, PolicyChunk)
+            assert isinstance(result.score, float)
+            assert 0.0 <= result.score <= 1.0
 
     def test_retriever_domain_filtering(self, sample_chunks):
         """Retriever should filter by domain correctly."""
@@ -196,8 +234,8 @@ class TestPolicyRetrieverFreeMode:
         )
         
         # Verify correct filtering
-        assert all(chunk.domain == "fintech" for chunk, _ in fintech_results)
-        assert all(chunk.domain == "insurance" for chunk, _ in insurance_results)
+        assert all(r.chunk.domain == "fintech" for r in fintech_results)
+        assert all(r.chunk.domain == "insurance" for r in insurance_results)
 
     def test_retriever_scoring_order(self, sample_chunks):
         """Results should be sorted by score (descending)."""
@@ -210,7 +248,7 @@ class TestPolicyRetrieverFreeMode:
         )
         
         # Scores should be in descending order
-        scores = [score for chunk, score in results]
+        scores = [r.score for r in results]
         assert scores == sorted(scores, reverse=True)
 
     def test_retriever_empty_chunks(self):

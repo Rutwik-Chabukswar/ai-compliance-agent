@@ -3,20 +3,22 @@ compliance_engine – AI-powered compliance detection engine.
 
 Public surface
 --------------
-    from compliance_engine import ComplianceEngine, ComplianceResult
+    from compliance_engine import ComplianceAgent, ComplianceResult
 
-    engine = ComplianceEngine()
-    result = engine.analyse(transcript="...", domain="fintech")
+    agent = ComplianceAgent(llm_client=..., retriever=...)
+    result = agent.analyse(transcript="...", domain="fintech")
     print(result.to_json())
 """
 
 import logging
 
+from compliance_engine.agent import ComplianceAgent
 from compliance_engine.compliance_engine import ComplianceEngine, ComplianceResult, DebugInfo
 from compliance_engine.llm_client import LLMClient
 from compliance_engine.config import LOG_LEVEL
 
 __all__ = [
+    "ComplianceAgent",
     "ComplianceEngine",
     "ComplianceResult",
     "DebugInfo",

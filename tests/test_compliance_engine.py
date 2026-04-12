@@ -36,10 +36,16 @@ def mock_llm_client() -> MagicMock:
 @pytest.fixture()
 def mock_retriever() -> MagicMock:
     """Return a mock retriever that returns a dummy chunk and score."""
-    from compliance_engine.rag import PolicyChunk, PolicyRetriever
+    from compliance_engine.rag import PolicyChunk, PolicyRetriever, RetrievedChunk
     retriever = MagicMock(spec=PolicyRetriever)
     chunk = PolicyChunk(source_file="dummy.txt", content="Guaranteed returns promise is illegal violation.", domain="fintech")
-    retriever.retrieve.return_value = [(chunk, 0.3)]
+    retrieved_chunk = RetrievedChunk(
+        chunk=chunk,
+        score=0.3,
+        matched_keywords=["guarantee", "returns"],
+        query_keyword_count=2,
+    )
+    retriever.retrieve.return_value = [retrieved_chunk]
     return retriever
 
 

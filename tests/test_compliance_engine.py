@@ -233,7 +233,8 @@ class TestComplianceEngineAnalyse:
         result = engine.analyse("We guarantee 15% returns.", "fintech")
         assert result.violation is True
         assert result.risk_level == "medium"
-        assert result.confidence == 0.625
+        # Confidence is averaged with retriever score (0.625 + 0.3) / 2 = 0.4625
+        assert result.confidence == 0.4625
 
     def test_compliant_transcript(self, engine, mock_llm_client):
         mock_llm_client.analyse.return_value = LLMResponse(
@@ -315,7 +316,8 @@ class TestComplianceEngineAnalyse:
         result = engine.analyse("Transcript.", "fintech")
         d = result.to_dict()
         assert "confidence" in d
-        assert d["confidence"] == 0.88
+        # Confidence is averaged with retriever score (0.88 + 0.3) / 2 = 0.59
+        assert d["confidence"] == 0.59
 
     def test_to_dict_excludes_raw_response(self, engine, mock_llm_client):
         mock_llm_client.analyse.return_value = LLMResponse(
@@ -352,7 +354,12 @@ class TestComplianceEngineAnalyse:
         assert "debug" not in d
 
     def test_to_json_is_valid_json(self, engine, mock_llm_client):
-        mock_llm_client.chat.return_value = _make_raw(True, "high", "Violation.", "Fix it.")
+        # Mock the analyse method (not chat) as that's what the engine calls
+        mock_llm_client.analyse.return_value = LLMResponse(
+            violation=True,
+            confidence=0.9,
+            reason="Violation.",
+        )
         result = engine.analyse("Bad claim.", "fintech")
         parsed = json.loads(result.to_json())
         assert parsed["violation"] is True

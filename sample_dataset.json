@@ -1,0 +1,58 @@
+[
+  {
+    "id": "custom_v1",
+    "domain": "fintech",
+    "transcript": "Invest in our fund - we guarantee 12% annual returns with absolutely no risk.",
+    "expected_violation": true,
+    "category": "Clear violation - guaranteed returns"
+  },
+  {
+    "id": "custom_v2",
+    "domain": "insurance",
+    "transcript": "Our policy covers everything - all claims are approved, no exclusions whatsoever.",
+    "expected_violation": true,
+    "category": "Clear violation - absolute coverage promise"
+  },
+  {
+    "id": "custom_v3",
+    "domain": "fintech",
+    "transcript": "Join our exclusive investment club - this opportunity won't last, get 100% guaranteed profits.",
+    "expected_violation": true,
+    "category": "Clear violation - guaranteed profits + urgency"
+  },
+  {
+    "id": "custom_s1",
+    "domain": "fintech",
+    "transcript": "Our fund has historically returned 6-8% annually. Past performance does not guarantee future results. All investments carry risk.",
+    "expected_violation": false,
+    "category": "Compliant - historical data with disclaimer"
+  },
+  {
+    "id": "custom_s2",
+    "domain": "insurance",
+    "transcript": "Our comprehensive plan offers broad coverage. Please review your policy document for specific coverage limits and exclusions.",
+    "expected_violation": false,
+    "category": "Compliant - qualified claim with caveats"
+  },
+  {
+    "id": "custom_s3",
+    "domain": "healthcare",
+    "transcript": "Our supplement may support wellness. These statements are not evaluated by the FDA and are not intended to diagnose or treat disease.",
+    "expected_violation": false,
+    "category": "Compliant - proper FDA disclaimer"
+  },
+  {
+    "id": "custom_a1",
+    "domain": "fintech",
+    "transcript": "Our AI-powered robo-advisor uses advanced technology to optimize your portfolio.",
+    "expected_violation": false,
+    "category": "Borderline - vague technical claims without specific promises"
+  },
+  {
+    "id": "custom_a2",
+    "domain": "insurance",
+    "transcript": "We provide excellent customer service and competitive rates.",
+    "expected_violation": false,
+    "category": "Borderline - generic marketing without substantive claims"
+  }
+]

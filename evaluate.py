@@ -1,25 +1,34 @@
 """
 evaluate.py
 -----------
-Offline evaluation harness for the AI Compliance Detection Engine.
+Offline evaluation harness for the AI Compliance Detection System.
 
-Defines 13 labelled test cases spanning clear violations, safe compliant
-statements, and ambiguous edge cases. Runs the engine on all cases and
-prints a structured accuracy report.
+Runs the ComplianceAgent against labelled test cases and computes comprehensive
+metrics: accuracy, precision, recall, false positives, and false negatives.
+
+Supports:
+  - Built-in 13-case test suite
+  - Custom JSON dataset files
+  - Multiple output formats (human-readable, JSON)
+  - Error analysis and per-case tracking
+  - Multiple evaluation modes
 
 Usage
 -----
-    # Standard run (uses OPENAI_API_KEY from env)
+    # Standard run (built-in test cases)
     python evaluate.py
+
+    # Load custom dataset
+    python evaluate.py --dataset custom_dataset.json
 
     # Enable debug metadata on each result
     python evaluate.py --debug
 
-    # Override model
-    python evaluate.py --model gpt-4o
-
-    # Save report to a JSON file
+    # Save report to JSON
     python evaluate.py --out results.json
+
+    # Verbose logging
+    python evaluate.py -v
 """
 
 import argparse
@@ -28,9 +37,12 @@ import logging
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
-from compliance_engine import ComplianceEngine, ComplianceResult
+from compliance_engine import ComplianceAgent, ComplianceResult
+from compliance_engine.llm_client import LLMClient
+from compliance_engine.rag import PolicyRetriever, load_policies_from_directory
+from compliance_engine.config import POLICIES_DIR
 
 # Silence INFO-level logs during evaluation so the report is readable.
 logging.getLogger("compliance_engine").setLevel(logging.WARNING)
@@ -235,53 +247,77 @@ class EvaluationReport:
     correct: int
     false_positives: int
     false_negatives: int
+    true_positives: int
+    true_negatives: int
 
     @property
     def accuracy(self) -> float:
-        return self.correct / self.evaluated if self.evaluated else 0.0
+        """(TP + TN) / Total Predictions"""
+        return (self.true_positives + self.true_negatives) / self.evaluated if self.evaluated else 0.0
+
+    @property
+    def precision(self) -> float:
+        """TP / (TP + FP) — Of predicted violations, how many were correct?"""
+        total_predicted_violations = self.true_positives + self.false_positives
+        return self.true_positives / total_predicted_violations if total_predicted_violations else 0.0
+
+    @property
+    def recall(self) -> float:
+        """TP / (TP + FN) — Of actual violations, how many did we catch?"""
+        total_actual_violations = self.true_positives + self.false_negatives
+        return self.true_positives / total_actual_violations if total_actual_violations else 0.0
+
+    @property
+    def f1_score(self) -> float:
+        """2 * (precision * recall) / (precision + recall)"""
+        if self.precision + self.recall == 0:
+            return 0.0
+        return 2 * (self.precision * self.recall) / (self.precision + self.recall)
 
     @property
     def false_positive_rate(self) -> float:
-        safe_cases = self.evaluated - (self.correct + self.false_negatives
-                                       - max(0, self.correct - self.false_negatives))
-        total_safe = sum(1 for tc in TEST_CASES if not tc.expected_violation)
+        """FP / (FP + TN) — Of safe statements, how many were incorrectly flagged?"""
+        total_safe = self.false_positives + self.true_negatives
         return self.false_positives / total_safe if total_safe else 0.0
 
     @property
     def false_negative_rate(self) -> float:
-        total_violations = sum(1 for tc in TEST_CASES if tc.expected_violation)
+        """FN / (TP + FN) — Of violations, how many were missed?"""
+        total_violations = self.true_positives + self.false_negatives
         return self.false_negatives / total_violations if total_violations else 0.0
 
 
 def run_evaluation(
-    engine: ComplianceEngine,
+    agent: ComplianceAgent,
     cases: List[TestCase],
     debug: bool = False,
 ) -> EvaluationReport:
     """
-    Run the engine on every test case and return aggregated metrics.
+    Run the agent on every test case and return aggregated metrics.
+
+    Computes accuracy, precision, recall, F1 score, and error rates.
 
     Parameters
     ----------
-    engine:
-        Initialised :class:`ComplianceEngine` instance.
+    agent:
+        Initialised :class:`ComplianceAgent` instance.
     cases:
         List of labelled :class:`TestCase` objects.
     debug:
-        Forward ``debug=True`` to ``engine.analyse()`` to capture debug info.
+        If True, includes debug metadata in results.
 
     Returns
     -------
     EvaluationReport
+        Comprehensive metrics including TP, TN, FP, FN.
     """
     errors = 0
 
     for tc in cases:
         try:
-            tc.result = engine.analyse(
+            tc.result = agent.analyse(
                 transcript=tc.transcript,
                 domain=tc.domain,
-                debug=debug,
             )
         except Exception as exc:  # noqa: BLE001
             tc.error = str(exc)
@@ -289,15 +325,20 @@ def run_evaluation(
             logging.warning("Case %s failed: %s", tc.id, exc)
 
     evaluated = [tc for tc in cases if tc.result is not None]
-    correct = sum(1 for tc in evaluated if tc.correct)
-    false_positives = sum(1 for tc in evaluated if tc.is_false_positive)
-    false_negatives = sum(1 for tc in evaluated if tc.is_false_negative)
+    
+    # Compute confusion matrix components
+    true_positives = sum(1 for tc in evaluated if tc.predicted_violation and tc.expected_violation)
+    true_negatives = sum(1 for tc in evaluated if not tc.predicted_violation and not tc.expected_violation)
+    false_positives = sum(1 for tc in evaluated if tc.predicted_violation and not tc.expected_violation)
+    false_negatives = sum(1 for tc in evaluated if not tc.predicted_violation and tc.expected_violation)
 
     return EvaluationReport(
         total=len(cases),
         evaluated=len(evaluated),
         errors=errors,
-        correct=correct,
+        correct=true_positives + true_negatives,
+        true_positives=true_positives,
+        true_negatives=true_negatives,
         false_positives=false_positives,
         false_negatives=false_negatives,
     )
@@ -411,18 +452,38 @@ def print_report(
     print(_c(sep, _BOLD))
 
     acc_color = _GREEN if report.accuracy >= 0.8 else _YELLOW if report.accuracy >= 0.6 else _RED
+    prec_color = _GREEN if report.precision >= 0.8 else _YELLOW if report.precision >= 0.6 else _RED
+    recall_color = _GREEN if report.recall >= 0.8 else _YELLOW if report.recall >= 0.6 else _RED
+    f1_color = _GREEN if report.f1_score >= 0.7 else _YELLOW if report.f1_score >= 0.5 else _RED
 
     rows = [
-        ("Total cases",       str(report.total)),
-        ("Evaluated",         str(report.evaluated)),
-        ("Errors (API/parse)", str(report.errors)),
-        ("Correct",           str(report.correct)),
-        ("Accuracy",          _c(f"{report.accuracy:.4f}  ({report.accuracy * 100:.1f}%)", acc_color)),
-        ("False Positives",   _c(str(report.false_positives), _YELLOW if report.false_positives else _GREEN)),
-        ("False Negatives",   _c(str(report.false_negatives), _YELLOW if report.false_negatives else _GREEN)),
+        ("Total cases",             str(report.total)),
+        ("Evaluated",               str(report.evaluated)),
+        ("Errors (API/parse)",      str(report.errors)),
+        ("",                        ""),
+        ("─── Confusion Matrix ───", ""),
+        ("True Positives (TP)",     str(report.true_positives)),
+        ("True Negatives (TN)",     str(report.true_negatives)),
+        ("False Positives (FP)",    _c(str(report.false_positives), _YELLOW if report.false_positives else _GREEN)),
+        ("False Negatives (FN)",    _c(str(report.false_negatives), _YELLOW if report.false_negatives else _GREEN)),
+        ("",                        ""),
+        ("─── Performance Metrics ─", ""),
+        ("Accuracy",                _c(f"{report.accuracy:.4f}  ({report.accuracy * 100:.1f}%)", acc_color)),
+        ("Precision",               _c(f"{report.precision:.4f}  ({report.precision * 100:.1f}%)", prec_color)),
+        ("Recall",                  _c(f"{report.recall:.4f}  ({report.recall * 100:.1f}%)", recall_color)),
+        ("F1 Score",                _c(f"{report.f1_score:.4f}", f1_color)),
+        ("",                        ""),
+        ("─── Error Rates ──────────", ""),
+        ("False Positive Rate",     _c(f"{report.false_positive_rate:.4f}  ({report.false_positive_rate * 100:.1f}%)", _YELLOW if report.false_positive_rate > 0.1 else _GREEN)),
+        ("False Negative Rate",     _c(f"{report.false_negative_rate:.4f}  ({report.false_negative_rate * 100:.1f}%)", _YELLOW if report.false_negative_rate > 0.1 else _GREEN)),
     ]
     for label, value in rows:
-        print(f"  {label:<25} {value}")
+        if label == "":
+            continue
+        if "───" in label:
+            print(_c(f"  {label}", _DIM))
+        else:
+            print(f"  {label:<27} {value}")
 
     print(_c(sep, _BOLD))
     print()
@@ -434,10 +495,17 @@ def print_report(
                 "total": report.total,
                 "evaluated": report.evaluated,
                 "errors": report.errors,
-                "correct": report.correct,
-                "accuracy": round(report.accuracy, 4),
+                "correct": report.true_positives + report.true_negatives,
+                "accuracy": round(report.accuracy, 6),
+                "precision": round(report.precision, 6),
+                "recall": round(report.recall, 6),
+                "f1_score": round(report.f1_score, 6),
+                "true_positives": report.true_positives,
+                "true_negatives": report.true_negatives,
                 "false_positives": report.false_positives,
                 "false_negatives": report.false_negatives,
+                "false_positive_rate": round(report.false_positive_rate, 6),
+                "false_negative_rate": round(report.false_negative_rate, 6),
             },
             "cases": [
                 {
@@ -447,6 +515,7 @@ def print_report(
                     "expected_violation": tc.expected_violation,
                     "predicted_violation": tc.predicted_violation,
                     "correct": tc.correct,
+                    "confidence": tc.result.confidence if tc.result else None,
                     "result": tc.result.to_dict() if tc.result else None,
                     "error": tc.error,
                 }
@@ -466,7 +535,14 @@ def print_report(
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="evaluate",
-        description="Run the compliance engine against a labelled test suite.",
+        description="Evaluate the compliance agent against labelled test cases.",
+    )
+    p.add_argument(
+        "--dataset",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help="Path to custom dataset JSON file (if not provided, uses built-in 13-case suite).",
     )
     p.add_argument(
         "--model",
@@ -477,7 +553,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--debug",
         action="store_true",
-        help="Enable debug mode on each engine call.",
+        help="Enable debug mode on each agent call.",
     )
     p.add_argument(
         "--out",
@@ -489,9 +565,80 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--verbose", "-v",
         action="store_true",
-        help="Show INFO-level engine logs during evaluation.",
+        help="Show INFO-level logs during evaluation.",
+    )
+    p.add_argument(
+        "--no-rag",
+        action="store_true",
+        help="Disable RAG (run agent without policy retrieval).",
     )
     return p
+
+
+def load_dataset_from_json(path: str) -> List[TestCase]:
+    """
+    Load a custom evaluation dataset from a JSON file.
+
+    Expected format:
+    [
+        {
+            "id": "T01",
+            "domain": "fintech",
+            "transcript": "...",
+            "expected_violation": true,
+            "category": "Violation type"
+        },
+        ...
+    ]
+
+    Parameters
+    ----------
+    path : str
+        Path to JSON file.
+
+    Returns
+    -------
+    List[TestCase]
+        Loaded test cases.
+
+    Raises
+    ------
+    FileNotFoundError
+        If file doesn't exist.
+    ValueError
+        If JSON format is invalid.
+    """
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Dataset file not found: {path}")
+
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+
+    if not isinstance(data, list):
+        raise ValueError("Dataset JSON must be a list of test cases")
+
+    cases = []
+    for i, item in enumerate(data):
+        try:
+            case = TestCase(
+                id=item.get("id", f"T{i+1:02d}"),
+                domain=item.get("domain", "fintech"),
+                transcript=item["transcript"],
+                expected_violation=item["expected_violation"],
+                category=item.get("category", "Custom test case"),
+            )
+            cases.append(case)
+        except KeyError as e:
+            raise ValueError(
+                f"Test case {i} missing required field: {e}"
+            ) from e
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"Test case {i} has invalid format: {e}"
+            ) from e
+
+    logging.info("Loaded %d test cases from %s", len(cases), path)
+    return cases
 
 
 def main() -> None:
@@ -499,24 +646,57 @@ def main() -> None:
 
     if args.verbose:
         logging.getLogger("compliance_engine").setLevel(logging.INFO)
+    else:
+        logging.getLogger("compliance_engine").setLevel(logging.WARNING)
 
-    if not os.getenv("OPENAI_API_KEY"):
-        print("⚠️  OPENAI_API_KEY is not set. Export it before running evaluate.py.")
+    # Load dataset
+    if args.dataset:
+        try:
+            cases = load_dataset_from_json(args.dataset)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"❌ Dataset loading failed: {e}")
+            sys.exit(1)
+    else:
+        cases = TEST_CASES
+
+    # Initialize agent components
+    llm_client = LLMClient(model=args.model) if args.model else LLMClient()
+
+    retriever = None
+    if not args.no_rag:
+        try:
+            policies = load_policies_from_directory(POLICIES_DIR)
+            if policies:
+                retriever = PolicyRetriever(policies)
+                logging.info("Loaded %d policies for RAG", len(policies))
+        except Exception as e:
+            logging.warning("Failed to load policies: %s. Running without RAG.", str(e))
+
+    # Initialize agent
+    agent = ComplianceAgent(
+        llm_client=llm_client,
+        retriever=retriever,
+        use_fallback_on_error=True,
+    )
+
+    # Run evaluation
+    print(f"\nRunning evaluation on {len(cases)} test cases…")
+    if retriever:
+        print(f"  ✓ RAG enabled ({len(retriever.chunks)} policies)")
+    else:
+        print(f"  ○ RAG disabled")
+    print()
+
+    report = run_evaluation(agent, cases, debug=args.debug)
+    print_report(cases, report, debug=args.debug, out_path=args.out)
+
+    # Exit code based on accuracy
+    if report.accuracy >= 0.80:
+        sys.exit(0)
+    elif report.accuracy >= 0.70:
         sys.exit(1)
-
-    engine_kwargs: dict = {}
-    if args.model:
-        from compliance_engine.llm_client import LLMClient
-        engine_kwargs["llm_client"] = LLMClient(model=args.model)
-
-    engine = ComplianceEngine(**engine_kwargs)
-
-    print(f"\nRunning {len(TEST_CASES)} test cases …")
-    report = run_evaluation(engine, TEST_CASES, debug=args.debug)
-    print_report(TEST_CASES, report, debug=args.debug, out_path=args.out)
-
-    # Exit 0 only when accuracy is above 70%
-    sys.exit(0 if report.accuracy >= 0.70 else 1)
+    else:
+        sys.exit(2)
 
 
 if __name__ == "__main__":

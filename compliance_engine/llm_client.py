@@ -531,6 +531,8 @@ class LLMClient:
         high_risk_phrases = [
             "guaranteed return",
             "guaranteed returns",
+            "guaranteed profit",
+            "guarantee profit",
             "no risk",
             "zero risk",
             "risk free",
@@ -549,34 +551,66 @@ class LLMClient:
             "act now",
         ]
 
+        # Specific compliant disclaimers to reduce false positives
+        compliant_indicators = [
+            "past performance is not",
+            "past returns do not",
+            "no guarantee of future",
+            "not guaranteed",
+            "not a guarantee",
+            "carries risk",
+            "carries substantial risk",
+            "subject to risk",
+            "may lose",
+            "could lose",
+            "risk of loss",
+            "not a guarantee",
+        ]
+
+        # Check for compliant language which mitigates violations
+        has_compliant_disclaimer = any(indicator in text for indicator in compliant_indicators)
+
         # Check for high-risk patterns
-        if any(phrase in text for phrase in high_risk_phrases) or (
-            "guarantee" in text and ("return" in text or "profit" in text)
-        ):
-            violation = True
-            risk_level = "high"
-            confidence = 0.95
-            reason = "Detected guaranteed return or zero-risk claim, which is prohibited."
-            suggestion = (
-                "Remove guaranteed return language and add appropriate "
-                "risk disclosures."
-            )
+        if any(phrase in text for phrase in high_risk_phrases):
+            # If there's a compliant disclaimer, lower the risk
+            if has_compliant_disclaimer:
+                violation = False
+                risk_level = "low"
+                confidence = 0.75
+                reason = (
+                    "Contains risk language but mitigated by appropriate disclaimers."
+                )
+                suggestion = "No action required; proper risk disclosures are present."
+            else:
+                violation = True
+                risk_level = "high"
+                confidence = 0.95
+                reason = "Detected guaranteed return or zero-risk claim without adequate disclaimers."
+                suggestion = (
+                    "Remove guaranteed language and add comprehensive risk disclosures."
+                )
         # Check for medium-risk patterns
         elif any(phrase in text for phrase in medium_risk_phrases):
-            violation = True
-            risk_level = "medium"
-            confidence = 0.70
-            reason = "Detected potentially misleading promotional language."
-            suggestion = (
-                "Add appropriate disclaimers and balance promotional claims "
-                "with risk information."
-            )
+            if has_compliant_disclaimer:
+                violation = False
+                risk_level = "low"
+                confidence = 0.80
+                reason = "Promotional language is present but mitigated by disclaimers."
+                suggestion = "No action required."
+            else:
+                violation = True
+                risk_level = "medium"
+                confidence = 0.70
+                reason = "Detected potentially misleading promotional language."
+                suggestion = (
+                    "Add appropriate disclaimers and balance claims with risk information."
+                )
         # Compliant
         else:
             violation = False
             risk_level = "low"
             confidence = 0.85
-            reason = "No explicit high-risk claims detected in transcript."
+            reason = "No explicit high-risk claims or misleading language detected."
             suggestion = "No action required."
 
         logger.debug(

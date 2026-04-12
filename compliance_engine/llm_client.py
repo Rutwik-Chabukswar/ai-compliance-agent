@@ -306,7 +306,16 @@ class LLMClient:
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[
-                        {"role": "system", "content": "You are a strict compliance officer."},
+                        {"role": "system", "content": (
+                            "You are a strict fintech compliance officer.\n"
+                            "Your job is to detect misleading, exaggerated, or guaranteed return claims.\n\n"
+                            "Rules:\n"
+                            "* Flag ONLY if there is a clear or implicit guarantee of returns.\n"
+                            "* DO NOT flag statements that include disclaimers like 'subject to market risks'.\n"
+                            "* Be conservative: avoid false positives.\n"
+                            "* When in doubt, mark as non-violation.\n"
+                            "* If there is a violation, suggestion must: 1. Explain briefly WHY it is a violation 2. Provide corrected sentence."
+                        )},
                         {"role": "user", "content": prompt}
                     ],
                     temperature=0
@@ -506,50 +515,57 @@ class LLMClient:
         """
         text = transcript.lower()
 
-        # Define risk thresholds and patterns
+        # Define high-risk patterns
         high_risk_phrases = [
-            "guaranteed return",
-            "guaranteed returns",
-            "no risk",
-            "zero risk",
-            "risk free",
+            "guarantee",
+            "guaranteed",
+            "100%",
             "risk-free",
-            "assured profit",
-            "cannot lose",
-            "will not lose",
+            "zero risk",
+            "assured returns",
+            "definitely profit",
         ]
 
-        medium_risk_phrases = [
-            "high returns",
-            "limited time offer",
-            "exclusive deal",
-            "best opportunity",
-            "don't miss out",
-            "act now",
+        safe_phrases = [
+            "no guarantees",
+            "subject to market risks",
+            "may",
+            "could",
+            "historically",
+            "may return",
         ]
+
+        # Check for safety override
+        is_safe = any(phrase in text for phrase in safe_phrases)
 
         # Check for high-risk patterns
-        if any(phrase in text for phrase in high_risk_phrases) or (
-            "guarantee" in text and ("return" in text or "profit" in text)
-        ):
-            violation = True
-            risk_level = "high"
-            confidence = 0.95
-            reason = "Detected guaranteed return or zero-risk claim, which is prohibited."
-            suggestion = (
-                "Remove guaranteed return language and add appropriate "
-                "risk disclosures."
-            )
+        if any(phrase in text for phrase in high_risk_phrases):
+            if is_safe:
+                violation = False
+                risk_level = "low"
+                confidence = 0.40
+                reason = "Contains risky keywords but accompanied by safe disclaimers."
+                suggestion = "No action required."
+            else:
+                violation = True
+                risk_level = "high"
+                confidence = 0.95
+                reason = "Detected guaranteed return or zero-risk claim, which is prohibited."
+                suggestion = "Avoid using guaranteed return language. Instead say: 'Returns are subject to market risks and not guaranteed.'"
         # Check for medium-risk patterns
-        elif any(phrase in text for phrase in medium_risk_phrases):
-            violation = True
-            risk_level = "medium"
-            confidence = 0.70
-            reason = "Detected potentially misleading promotional language."
-            suggestion = (
-                "Add appropriate disclaimers and balance promotional claims "
-                "with risk information."
-            )
+        elif any(phrase in text for phrase in ["high returns", "limited time offer", "exclusive deal", "best opportunity", "don't miss out", "act now"]):
+            if is_safe:
+                violation = False
+                risk_level = "low"
+                confidence = 0.45
+                reason = "Contains promotional language but properly qualified by safe disclaimers."
+                suggestion = "No action required."
+            else:
+                violation = True
+                risk_level = "medium"
+                confidence = 0.70
+                reason = "Detected potentially misleading promotional language."
+                suggestion = "Avoid urgent or overly promotional language. Instead say: 'Explore our options to see if they fit your goals.'"
         # Compliant
         else:
             violation = False
